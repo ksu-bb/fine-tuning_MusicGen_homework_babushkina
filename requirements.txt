@@ -1,0 +1,6 @@
+audiocraft
+yt-dlp
+ffmpeg-python
+openai
+python-dotenv
+wandb
