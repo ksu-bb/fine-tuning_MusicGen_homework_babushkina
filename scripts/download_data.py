@@ -1,44 +1,89 @@
 import os
-import subprocess
 import json
-import pandas as pd
 from datasets import load_dataset
+from tqdm import tqdm
+import subprocess
+import time
+import argparse
 
-OUTPUT_DIR = "data/audio"
-METADATA_DIR = "data/metadata"
-NUM_SAMPLES = 50  
-DURATION = 10     
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(METADATA_DIR, exist_ok=True)
+def setup_dirs(base_dir):
+    os.makedirs(os.path.join(base_dir, "audio"), exist_ok=True)
+    os.makedirs(os.path.join(base_dir, "logs"), exist_ok=True)
 
+def load_progress(path):
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
 
-dataset = load_dataset("google/MusicCaps", split="train")
-samples = dataset.select(range(NUM_SAMPLES))
+def save_progress(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f)
 
-
-for i, item in enumerate(samples):
-    youtube_id = item['yt_id']
-    caption = item['caption']
-    output_filename = f"{youtube_id}.wav"
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
+def download_track(yt_id, out_dir, duration=10):
+    out_path = os.path.join(out_dir, f"{yt_id}.wav")
+    if os.path.exists(out_path):
+        return True, out_path
     
-    if os.path.exists(output_path):
-        continue
-
+    url = f"https://www.youtube.com/watch?v={yt_id}"
     cmd = [
-        "yt-dlp",
-        "-x",                    
-        "--audio-format", "wav", 
-        "--postprocessor-args", f"ffmpeg:-ss 00:00:00 -t {DURATION} -ar 16000 -ac 1", 
-        "-o", output_path,       
-        f"https://www.youtube.com/watch?v={youtube_id}"]
+        "yt-dlp", "-x", "--audio-format", "wav",
+        "--postprocessor-args", f"ffmpeg:-ss 00:00:00 -t 00:00:{duration}",
+        "-o", out_path, url]
     
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        meta_path = os.path.join(METADATA_DIR, f"{youtube_id}.json")
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump({"yt_id": youtube_id, "raw_caption": caption}, f, ensure_ascii=False, indent=2)
-            
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and os.path.exists(out_path):
+            return True, out_path
+        return False, None
     except Exception as e:
-        continue
+        return False, None
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output_dir", type=str, default="/content/drive/MyDrive/musicgen_data")
+    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--duration", type=int, default=10)
+    args = parser.parse_args()
+
+    setup_dirs(args.output_dir)
+    audio_dir = os.path.join(args.output_dir, "audio")
+    manifest_path = os.path.join(args.output_dir, "manifest.jsonl")
+    progress_path = os.path.join(args.output_dir, "progress.json")
+
+    downloaded = load_progress(progress_path)
+    dataset = load_dataset("google/MusicCaps", split="train")
+    subset = dataset.select(range(min(args.limit, len(dataset))))
+
+    existing = set()
+    if os.path.exists(manifest_path):
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                item = json.loads(line)
+                existing.add(item['youtube_id'])
+    
+    for i, row in enumerate(tqdm(subset)):
+        vid = row['youtube_id']
+        if vid in downloaded or vid in existing:
+            continue
+        
+        success, path = download_track(vid, audio_dir, args.duration)
+        if success:
+            entry = {
+                "youtube_id": vid,
+                "audio_path": path,
+                "caption": row['caption'],
+                "aspect_ratio": row.get('aspect_ratio', '')
+            }
+            with open(manifest_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+            downloaded.append(vid)
+            existing.add(vid)
+            if len(downloaded) % 10 == 0:
+                save_progress(progress_path, downloaded)
+        time.sleep(1)  
+
+    save_progress(progress_path, downloaded)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,69 @@
+model:
+  name: musicgen-small
+  checkpoint: facebook/musicgen-small
+  compression_model: facebook/encodec_32khz
+  transformer_lm: null  
+
+data:
+  train_manifest: /content/drive/MyDrive/musicgen_data/enriched_manifest_train.jsonl
+  valid_manifest: /content/drive/MyDrive/musicgen_data/enriched_manifest_valid.jsonl
+  audio_dir: /content/drive/MyDrive/musicgen_data/audio
+  
+  sample_rate: 32000
+  channels: 1 
+  segment_duration: 10  
+
+  text_fields:
+    - description
+    - general_mood
+    - genre_tags
+    - lead_instrument
+    - accompaniment
+    - tempo_and_rhythm
+    - vocal_presence
+    - production_quality
+
+  merge_text_p: 0.5
+  drop_desc_p: 0.1
+  drop_other_p: 0.1
+
+  min_audio_duration: 10 
+  max_audio_duration: 30  
+  shuffle: true
+  num_workers: 2  
+
+training:
+  optimizer: adamw
+  lr: 1e-5  
+  weight_decay: 0.01
+  max_grad_norm: 1.0  
+
+  batch_size: 1  
+  gradient_accumulation: 8  
+  dtype: float16  
+  
+  max_train_steps: 3000  
+  warmup_steps: 100  
+  eval_every: 500  
+
+  save_every: 500  
+  checkpoint_dir: /content/drive/MyDrive/musicgen_checkpoints/  
+  keep_last: 3  
+
+  use_wandb: true
+  wandb_project: musicgen-hw4
+  wandb_name: small_structured_metadata
+  log_every: 50  
+
+validation:
+  generate_every: 500  
+  num_generate: 2  
+  duration: 10  
+  prompts:
+    - "A calm acoustic guitar melody with soft percussion"
+    - "Energetic electronic beat with synth lead"
+
+misc:
+  seed: 42  
+  num_ckpt_keep: 3  
+  device: cuda  
