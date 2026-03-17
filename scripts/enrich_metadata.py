@@ -28,9 +28,10 @@ Rules:
 - Keep values concise but descriptive.
 - Use English for all field values.
 - If info is missing, use "Unknown" or empty list.
+- For genre_tags, always output a list even if only one genre.
 """
 
-def enrich_with_gemini(caption: str, api_key: str, model_name="gemini-pro") -> dict:
+def enrich_with_gemini(caption: str, api_key: str, model_name="gemini-1.5-pro") -> dict:
     if not HAS_GEMINI:
         raise ImportError("Install google-generativeai: pip install google-generativeai")
     
@@ -42,8 +43,7 @@ def enrich_with_gemini(caption: str, api_key: str, model_name="gemini-pro") -> d
     try:
         response = model.generate_content(
             [SYSTEM_PROMPT, prompt],
-            generation_config={"temperature": 0.1}
-        )
+            generation_config={"temperature": 0.1, "max_output_tokens": 512})
         text = response.text.strip()
         if text.startswith("```json"):
             text = text[7:]
@@ -53,56 +53,100 @@ def enrich_with_gemini(caption: str, api_key: str, model_name="gemini-pro") -> d
             text = text[:-3]
         return json.loads(text.strip())
     except Exception as e:
-        print(f"API Error: {e}")
         return None
 
 def load_manifest(path):
     entries = []
     with open(path, 'r', encoding='utf-8') as f:
         for line in f:
-            if line.strip():
+            line = line.strip()
+            if line:
                 entries.append(json.loads(line))
     return entries
 
-def save_enriched(path, entry):
-    with open(path, 'a', encoding='utf-8') as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+def save_json_metadata(entry: dict, enriched: dict, audio_dir: str):
+    audio_path = entry.get("audio_path") or entry.get("path")
+    if not audio_path:
+        audio_path = os.path.join(audio_dir, f"{entry['youtube_id']}.wav")
+    json_path = os.path.splitext(audio_path)[0] + ".json"
+    
+    metadata = {
+        "description": enriched.get("description", ""),
+        "general_mood": enriched.get("general_mood", ""),
+        "genre_tags": enriched.get("genre_tags", []),
+        "lead_instrument": enriched.get("lead_instrument", ""),
+        "accompaniment": enriched.get("accompaniment", ""),
+        "tempo_and_rhythm": enriched.get("tempo_and_rhythm", ""),
+        "vocal_presence": enriched.get("vocal_presence", ""),
+        "production_quality": enriched.get("production_quality", ""),
+        "original_caption": entry.get("caption", "")  
+    }
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    return json_path
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=str, required=True, help="Path to input manifest.jsonl")
-    parser.add_argument("--output", type=str, required=True, help="Path to output enriched.jsonl")
+    parser.add_argument("--manifest", type=str, required=True, help="Path to input manifest.jsonl (with audio paths and captions)")
+    parser.add_argument("--audio_dir", type=str, default=None, help="Directory where audio files are stored (if paths in manifest are relative)")
     parser.add_argument("--api_key", type=str, required=True, help="Gemini API key")
     parser.add_argument("--limit", type=int, default=None, help="Process only N entries")
     parser.add_argument("--delay", type=float, default=2.0, help="Delay between API calls (seconds)")
+    parser.add_argument("--output_manifest", type=str, default=None, help="Optional: create a new manifest with only audio paths for training")
     args = parser.parse_args()
 
     entries = load_manifest(args.manifest)
     if args.limit:
         entries = entries[:args.limit]
 
+    if args.audio_dir is None:
+        if entries and ("audio_path" in entries[0] or "path" in entries[0]):
+            first_path = entries[0].get("audio_path") or entries[0].get("path")
+            args.audio_dir = os.path.dirname(first_path)
+        else:
+            args.audio_dir = os.path.join(os.path.dirname(args.manifest), "audio")
+
+    os.makedirs(args.audio_dir, exist_ok=True)
+
     processed = set()
-    if os.path.exists(args.output):
-        with open(args.output, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    item = json.loads(line)
-                    processed.add(item['youtube_id'])
-    
-    for entry in tqdm(entries):
-        vid = entry['youtube_id']
-        if vid in processed:
-            continue
-        
-        caption = entry.get('caption', '')
-        enriched = enrich_with_gemini(caption, args.api_key)
-        
-        if enriched:
-            output_entry = {**entry, "enriched_metadata": enriched}
-            save_enriched(args.output, output_entry)
-            processed.add(vid)
-        
-        time.sleep(args.delay) 
+    for entry in entries:
+        audio_path = entry.get("audio_path") or entry.get("path")
+        if audio_path:
+            json_path = os.path.splitext(audio_path)[0] + ".json"
+            if os.path.exists(json_path):
+                processed.add(entry["youtube_id"])
+
+    out_manifest_fh = None
+    if args.output_manifest:
+        out_manifest_fh = open(args.output_manifest, 'w', encoding='utf-8')
+
+    try:
+        for entry in tqdm(entries):
+            vid = entry["youtube_id"]
+            if vid in processed:
+                continue
+
+            caption = entry.get("caption", "")
+            if not caption:
+                continue
+
+            enriched = enrich_with_gemini(caption, args.api_key)
+            if enriched:
+                json_path = save_json_metadata(entry, enriched, args.audio_dir)
+                processed.add(vid)
+
+                if out_manifest_fh:
+                    audio_path = entry.get("audio_path") or entry.get("path")
+                    if not audio_path:
+                        audio_path = os.path.join(args.audio_dir, f"{vid}.wav")
+                    out_manifest_fh.write(json.dumps({"path": audio_path}, ensure_ascii=False) + '\n')
+            else:
+                print(f"Failed")
+
+            time.sleep(args.delay)
+    finally:
+        if out_manifest_fh:
+            out_manifest_fh.close()
 
 if __name__ == "__main__":
     main()
